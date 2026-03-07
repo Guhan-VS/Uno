@@ -204,6 +204,11 @@
   transition: transform 0.2s, box-shadow 0.2s;
 }
 
+.color-btn.red { background-color: #e74c3c; }
+.color-btn.blue { background-color: #3498db; }
+.color-btn.green { background-color: #2ecc71; }
+.color-btn.yellow { background-color: #f1c40f; }
+
 .color-btn:hover {
   transform: scale(1.15) rotate(10deg);
   box-shadow: 0 0 20px rgba(255,255,255,0.4);
