@@ -16,12 +16,18 @@ app.get('/', (req, res) => res.status(200).send('Uno Server Running'));
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  pingTimeout: 30000,
-  pingInterval: 10000,
-  transports: ['websocket', 'polling'], // Prioritize WebSocket
+  pingTimeout: 60000, // Increased for better stability on mobile/flaky networks
+  pingInterval: 25000,
+  transports: ['websocket', 'polling'], 
 });
 
 const rooms = {};
+
+// Monitor memory and active rooms every 5 minutes
+setInterval(() => {
+  const used = process.memoryUsage().heapUsed / 1024 / 1024;
+  console.log(`[Monitor] Memory: ${Math.round(used * 100) / 100}MB | Active Rooms: ${Object.keys(rooms).length}`);
+}, 300000);
 
 const createDeck = () => {
   const colors = ['red', 'blue', 'green', 'yellow'];
@@ -202,9 +208,14 @@ io.on('connection', (socket) => {
 
   socket.on('play_card', ({ roomId, cardIndex, colorSelection }) => {
     const room = rooms[roomId];
-    if (!room) return;
+    if (!room) { console.warn(`play_card: Room ${roomId} not found`); return; }
     const player = room.players[room.currentPlayerIndex];
-    if (!player || player.id !== socket.id) return; 
+    
+    if (!player) { console.warn(`play_card: Current player not found`); return; }
+    if (player.id !== socket.id) {
+      console.warn(`play_card REJECTED: Socket ID mismatch. Room expected: ${player.username} (${player.id}), Emitting socket: ${socket.id}. (Maybe a stale tab?)`);
+      return;
+    }
 
     const card = player.hand[cardIndex];
     if (!card) return;

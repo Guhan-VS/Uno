@@ -43,39 +43,48 @@ function App() {
 
   useEffect(() => {
     // Keep-alive for Render's free tier (standard HTTP traffic keeps instance active)
+    // 45s is safer than 5m to prevent Render's 100s idle timeout
     const keepAlive = setInterval(() => {
       fetch(`${SERVER_URL}/health`).catch(() => {});
-    }, 5 * 60 * 1000);
+    }, 45 * 1000);
 
     const onConnect = () => {
       setConnected(true);
-      console.log('Socket connected with transport:', socket.io.engine.transport.name);
+      console.log(`Socket connected! ID: ${socket.id} | Transport: ${socket.io.engine.transport.name}`);
       // Rejoin if we have room info
       const savedRoom = sessionStorage.getItem('uno_room_id');
       const savedName = localStorage.getItem('uno_username');
       if (savedRoom && savedName) {
+        console.log(`Re-joining room ${savedRoom} as ${savedName}`);
         socket.emit('join_room', { roomId: savedRoom, username: savedName, userId });
         setJoined(true);
       }
     };
     const onDisconnect = (reason: string) => {
       setConnected(false);
-      console.log('Socket disconnected:', reason);
+      console.warn('Socket disconnected:', reason);
+    };
+
+    // Auto-sync when user returns to the tab
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && socket.connected && roomId && joined) {
+        console.log('Tab became visible, re-syncing game state...');
+        socket.emit('join_room', { roomId, username, userId });
+      }
     };
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
+    socket.on('connect_error', (err) => console.error('Socket Connection Error:', err));
     socket.on('room_data', (data) => {
       setRoomData(data);
-      // If the server says the game hasn't started but we think it has,
-      // it means the server probably restarted. Reset to lobby.
       if (!data.gameStarted && gameState) {
         console.log('Game reset by server (likely restart). Returning to lobby.');
         setGameState(null);
       }
     });
     socket.on('game_state', (state) => setGameState(state));
-    socket.on('error', (msg) => { alert(msg); setJoined(false); sessionStorage.removeItem('uno_room_id'); });
+    socket.on('error', (msg) => { console.error('Server error:', msg); alert(msg); setJoined(false); sessionStorage.removeItem('uno_room_id'); });
     socket.on('game_over', (data) => { 
       setGameOverData(data); 
       setGameState(null); 
@@ -86,17 +95,20 @@ function App() {
       setTimeout(() => setNotification(null), 3000);
     });
 
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     if (socket.connected) onConnect();
 
     return () => {
       clearInterval(keepAlive);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
+      socket.off('connect_error');
       socket.off('room_data'); socket.off('game_state');
       socket.off('error'); socket.off('game_over');
       socket.off('notification');
     };
-  }, [userId, gameState]);
+  }, [userId, gameState, roomId, username, joined]);
 
   const generateRoomCode = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
