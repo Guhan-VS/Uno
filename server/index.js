@@ -1,17 +1,20 @@
 require('dotenv').config();
 const express = require('express');
+const compression = require('compression');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
+app.use(compression());
 app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  pingTimeout: 60000,
-  pingInterval: 25000,
+  pingTimeout: 30000,
+  pingInterval: 10000,
+  transports: ['websocket', 'polling'], // Prioritize WebSocket
 });
 
 const rooms = {};
@@ -68,6 +71,52 @@ const moveToNextPlayer = (room) => {
   room.currentPlayerIndex = nextIndex;
 };
 
+const broadcastGameState = (roomId) => {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  room.players.forEach((player) => {
+    // Sanitize state for each player: hide other players' hands
+    const sanitizedPlayers = room.players.map((p) => ({
+      id: p.id,
+      userId: p.userId,
+      username: p.username,
+      hand: p.userId === player.userId ? p.hand : new Array(p.hand.length).fill({}),
+      handLength: p.hand.length,
+      hasFinished: p.hasFinished,
+      unoDeclared: p.unoDeclared,
+      connected: p.connected,
+    }));
+
+    const sanitizedState = {
+      ...room,
+      players: sanitizedPlayers,
+      deck: undefined, // Don't send the deck
+    };
+
+    io.to(player.id).emit('game_state', sanitizedState);
+  });
+};
+
+const broadcastRoomData = (roomId) => {
+  const room = rooms[roomId];
+  if (!room) return;
+  
+  const sanitizedPlayers = room.players.map(p => ({
+    id: p.id,
+    userId: p.userId,
+    username: p.username,
+    connected: p.connected
+  }));
+
+  io.to(roomId).emit('room_data', {
+    ...room,
+    players: sanitizedPlayers,
+    deck: undefined,
+    discardPile: undefined
+  });
+};
+
 io.on('connection', (socket) => {
   socket.on('join_room', ({ roomId, username, userId }) => {
     if (!rooms[roomId]) {
@@ -100,9 +149,9 @@ io.on('connection', (socket) => {
       rooms[roomId].players.push(player);
     }
     
-    io.to(roomId).emit('room_data', rooms[roomId]);
+    broadcastRoomData(roomId);
     if (rooms[roomId].gameStarted) {
-      socket.emit('game_state', rooms[roomId]);
+      broadcastGameState(roomId);
     }
   });
 
@@ -112,7 +161,8 @@ io.on('connection', (socket) => {
         const player = rooms[roomId].players.find(p => p.id === socket.id);
         if (player) {
           player.connected = false;
-          io.to(roomId).emit('room_data', rooms[roomId]);
+          broadcastRoomData(roomId);
+          if (rooms[roomId].gameStarted) broadcastGameState(roomId);
           // Notify others
           io.to(roomId).emit('notification', `${player.username} disconnected`);
         }
@@ -121,8 +171,8 @@ io.on('connection', (socket) => {
   });
 
   socket.on('start_game', (roomId) => {
-    const room = startGame(roomId);
-    io.to(roomId).emit('game_state', room);
+    startGame(roomId);
+    broadcastGameState(roomId);
   });
 
   socket.on('declare_uno', (roomId) => {
@@ -131,15 +181,20 @@ io.on('connection', (socket) => {
     const player = room.players.find(p => p.id === socket.id);
     if (player) {
       player.unoDeclared = true;
-      io.to(roomId).emit('game_state', room);
+      broadcastGameState(roomId);
       io.to(roomId).emit('notification', `${player.username} declared UNO!`);
     }
   });
 
   socket.on('play_card', ({ roomId, cardIndex, colorSelection }) => {
     const room = rooms[roomId];
+    if (!room) return;
     const player = room.players[room.currentPlayerIndex];
+    if (player.id !== socket.id) return; // Basic turn validation
+
     const card = player.hand[cardIndex];
+    if (!card) return;
+    
     const topCard = room.discardPile[room.discardPile.length - 1];
 
     let isPlayable = false;
@@ -201,13 +256,16 @@ io.on('connection', (socket) => {
         moveToNextPlayer(room);
       }
 
-      io.to(roomId).emit('game_state', room);
+      broadcastGameState(roomId);
     }
   });
 
   socket.on('draw_card', (roomId) => {
     const room = rooms[roomId];
+    if (!room) return;
     const player = room.players[room.currentPlayerIndex];
+    if (player.id !== socket.id) return;
+
     player.unoDeclared = false; // Reset if drawing
 
     if (room.drawStack > 0) {
@@ -234,14 +292,18 @@ io.on('connection', (socket) => {
       if (isPlayable) room.canPlayDrawnCard = true;
       else { moveToNextPlayer(room); room.canPlayDrawnCard = false; }
     }
-    io.to(roomId).emit('game_state', room);
+    broadcastGameState(roomId);
   });
 
   socket.on('pass_turn', (roomId) => {
     const room = rooms[roomId];
+    if (!room) return;
+    const player = room.players[room.currentPlayerIndex];
+    if (player.id !== socket.id) return;
+
     moveToNextPlayer(room);
     room.canPlayDrawnCard = false;
-    io.to(roomId).emit('game_state', room);
+    broadcastGameState(roomId);
   });
 
   socket.on('end_game_manual', (roomId) => {
@@ -252,4 +314,5 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(3001, () => console.log('Server running on 3001'));
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
