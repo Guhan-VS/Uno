@@ -9,6 +9,10 @@ const app = express();
 app.use(compression());
 app.use(cors());
 
+// Health check for Render/Fly.io to keep instance alive and monitor status
+app.get('/health', (req, res) => res.status(200).send('OK'));
+app.get('/', (req, res) => res.status(200).send('Uno Server Running'));
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
@@ -118,8 +122,11 @@ const broadcastRoomData = (roomId) => {
 };
 
 io.on('connection', (socket) => {
+  console.log(`New connection: ${socket.id}`);
+
   socket.on('join_room', ({ roomId, username, userId }) => {
     if (!rooms[roomId]) {
+      console.log(`Creating new room: ${roomId}`);
       rooms[roomId] = { players: [], gameStarted: false, hostId: socket.id, hostUserId: userId };
     }
     
@@ -129,6 +136,7 @@ io.on('connection', (socket) => {
     let player = rooms[roomId].players.find(p => p.userId === userId);
     
     if (player) {
+      console.log(`User ${username} reconnected to room ${roomId}`);
       // Reconnection: update socket ID
       player.id = socket.id;
       player.connected = true;
@@ -137,6 +145,7 @@ io.on('connection', (socket) => {
       if (rooms[roomId].gameStarted) { socket.emit('error', 'Game already started'); return; }
       if (rooms[roomId].players.length >= 20) { socket.emit('error', 'Room full'); return; }
       
+      console.log(`User ${username} joined room ${roomId}`);
       player = { 
         id: socket.id, 
         userId, 
@@ -161,6 +170,7 @@ io.on('connection', (socket) => {
         const player = rooms[roomId].players.find(p => p.id === socket.id);
         if (player) {
           player.connected = false;
+          console.log(`User ${player.username} disconnected from room ${roomId}`);
           broadcastRoomData(roomId);
           if (rooms[roomId].gameStarted) broadcastGameState(roomId);
           // Notify others
@@ -171,8 +181,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('start_game', (roomId) => {
-    startGame(roomId);
-    broadcastGameState(roomId);
+    if (rooms[roomId]) {
+      console.log(`Starting game in room ${roomId}`);
+      startGame(roomId);
+      broadcastGameState(roomId);
+    }
   });
 
   socket.on('declare_uno', (roomId) => {
@@ -181,6 +194,7 @@ io.on('connection', (socket) => {
     const player = room.players.find(p => p.id === socket.id);
     if (player) {
       player.unoDeclared = true;
+      console.log(`[Room ${roomId}] ${player.username} declared UNO!`);
       broadcastGameState(roomId);
       io.to(roomId).emit('notification', `${player.username} declared UNO!`);
     }
@@ -190,7 +204,7 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
     const player = room.players[room.currentPlayerIndex];
-    if (player.id !== socket.id) return; // Basic turn validation
+    if (!player || player.id !== socket.id) return; 
 
     const card = player.hand[cardIndex];
     if (!card) return;
@@ -211,8 +225,11 @@ io.on('connection', (socket) => {
     }
 
     if (isPlayable) {
+      console.log(`[Room ${roomId}] ${player.username} played ${card.value} of ${card.color}`);
+      
       // Check for UNO penalty
       if (player.hand.length === 2 && !player.unoDeclared) {
+        console.log(`[Room ${roomId}] ${player.username} forgot to say UNO! Penalty applied.`);
         for (let i = 0; i < 2; i++) {
           if (room.deck.length < 2) {
             const top = room.discardPile.pop();
@@ -234,9 +251,11 @@ io.on('connection', (socket) => {
 
       if (player.hand.length === 0) {
         player.hasFinished = true;
+        console.log(`[Room ${roomId}] ${player.username} finished the game!`);
         room.winners.push(player.username);
         const remaining = room.players.filter(p => !p.hasFinished);
         if (remaining.length <= 1) {
+          console.log(`[Room ${roomId}] Game Over! Winners: ${room.winners.join(', ')}`);
           io.to(roomId).emit('game_over', { winners: room.winners, loser: remaining[0]?.username });
           delete rooms[roomId];
           return;
@@ -264,9 +283,10 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
     const player = room.players[room.currentPlayerIndex];
-    if (player.id !== socket.id) return;
+    if (!player || player.id !== socket.id) return;
 
     player.unoDeclared = false; // Reset if drawing
+    console.log(`[Room ${roomId}] ${player.username} is drawing cards`);
 
     if (room.drawStack > 0) {
       for (let i = 0; i < room.drawStack; i++) {
@@ -289,7 +309,10 @@ io.on('connection', (socket) => {
       player.hand.push(drawn);
       const top = room.discardPile[room.discardPile.length - 1];
       const isPlayable = drawn.color === 'wild' || drawn.color === top.color || drawn.value === top.value || (top.color === 'wild' && drawn.color === room.currentWildColor);
-      if (isPlayable) room.canPlayDrawnCard = true;
+      if (isPlayable) {
+        room.canPlayDrawnCard = true;
+        console.log(`[Room ${roomId}] Drawn card is playable for ${player.username}`);
+      }
       else { moveToNextPlayer(room); room.canPlayDrawnCard = false; }
     }
     broadcastGameState(roomId);
@@ -299,8 +322,9 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
     const player = room.players[room.currentPlayerIndex];
-    if (player.id !== socket.id) return;
+    if (!player || player.id !== socket.id) return;
 
+    console.log(`[Room ${roomId}] ${player.username} passed turn`);
     moveToNextPlayer(room);
     room.canPlayDrawnCard = false;
     broadcastGameState(roomId);
@@ -308,6 +332,7 @@ io.on('connection', (socket) => {
 
   socket.on('end_game_manual', (roomId) => {
     if (rooms[roomId]) {
+      console.log(`[Room ${roomId}] Manual end game requested`);
       io.to(roomId).emit('game_over', { winners: rooms[roomId].winners, forced: true });
       delete rooms[roomId];
     }
@@ -315,4 +340,9 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`\n🚀 Uno Multiplayer Server running on port ${PORT}`);
+  console.log(`📅 Started at: ${new Date().toLocaleString()}`);
+  console.log(`📦 Node Version: ${process.version}`);
+  console.log('-------------------------------------------\n');
+});

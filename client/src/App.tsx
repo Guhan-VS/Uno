@@ -4,7 +4,10 @@ import './App.css';
 
 // Detect environment variable for production, fallback to current hostname for local network play
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || `http://${window.location.hostname}:3001`;
-const socket = io(SERVER_URL);
+const socket = io(SERVER_URL, {
+  transports: ['websocket'],
+  reconnectionAttempts: Infinity,
+});
 
 interface Card { color: string; value: string; }
 interface Player { id: string; username: string; hand: Card[]; hasFinished: boolean; unoDeclared: boolean; }
@@ -39,8 +42,14 @@ function App() {
   const [notification, setNotification] = useState<string | null>(null);
 
   useEffect(() => {
+    // Keep-alive for Render's free tier (standard HTTP traffic keeps instance active)
+    const keepAlive = setInterval(() => {
+      fetch(`${SERVER_URL}/health`).catch(() => {});
+    }, 5 * 60 * 1000);
+
     const onConnect = () => {
       setConnected(true);
+      console.log('Socket connected with transport:', socket.io.engine.transport.name);
       // Rejoin if we have room info
       const savedRoom = sessionStorage.getItem('uno_room_id');
       const savedName = localStorage.getItem('uno_username');
@@ -49,11 +58,22 @@ function App() {
         setJoined(true);
       }
     };
-    const onDisconnect = () => setConnected(false);
+    const onDisconnect = (reason: string) => {
+      setConnected(false);
+      console.log('Socket disconnected:', reason);
+    };
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
-    socket.on('room_data', (data) => setRoomData(data));
+    socket.on('room_data', (data) => {
+      setRoomData(data);
+      // If the server says the game hasn't started but we think it has,
+      // it means the server probably restarted. Reset to lobby.
+      if (!data.gameStarted && gameState) {
+        console.log('Game reset by server (likely restart). Returning to lobby.');
+        setGameState(null);
+      }
+    });
     socket.on('game_state', (state) => setGameState(state));
     socket.on('error', (msg) => { alert(msg); setJoined(false); sessionStorage.removeItem('uno_room_id'); });
     socket.on('game_over', (data) => { 
@@ -69,13 +89,14 @@ function App() {
     if (socket.connected) onConnect();
 
     return () => {
+      clearInterval(keepAlive);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('room_data'); socket.off('game_state');
       socket.off('error'); socket.off('game_over');
       socket.off('notification');
     };
-  }, [userId]);
+  }, [userId, gameState]);
 
   const generateRoomCode = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
