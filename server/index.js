@@ -10,6 +10,8 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 const rooms = {};
@@ -58,24 +60,64 @@ const startGame = (roomId) => {
 
 const moveToNextPlayer = (room) => {
   let nextIndex = (room.currentPlayerIndex + room.direction + room.players.length) % room.players.length;
-  while (room.players[nextIndex].hasFinished) {
+  let attempts = 0;
+  while (room.players[nextIndex].hasFinished && attempts < room.players.length) {
     nextIndex = (nextIndex + room.direction + room.players.length) % room.players.length;
+    attempts++;
   }
   room.currentPlayerIndex = nextIndex;
 };
 
 io.on('connection', (socket) => {
-  socket.on('join_room', ({ roomId, username }) => {
-    if (!rooms[roomId]) rooms[roomId] = { players: [], gameStarted: false, hostId: socket.id };
-    if (rooms[roomId].gameStarted) { socket.emit('error', 'Game already started'); return; }
-    if (rooms[roomId].players.length >= 20) { socket.emit('error', 'Room full'); return; }
+  socket.on('join_room', ({ roomId, username, userId }) => {
+    if (!rooms[roomId]) {
+      rooms[roomId] = { players: [], gameStarted: false, hostId: socket.id, hostUserId: userId };
+    }
     
     socket.join(roomId);
-    const existing = rooms[roomId].players.find(p => p.id === socket.id);
-    if (!existing) rooms[roomId].players.push({ id: socket.id, username, hand: [], hasFinished: false, unoDeclared: false });
+    
+    // Check if player is reconnecting
+    let player = rooms[roomId].players.find(p => p.userId === userId);
+    
+    if (player) {
+      // Reconnection: update socket ID
+      player.id = socket.id;
+      player.connected = true;
+      if (rooms[roomId].hostUserId === userId) rooms[roomId].hostId = socket.id;
+    } else {
+      if (rooms[roomId].gameStarted) { socket.emit('error', 'Game already started'); return; }
+      if (rooms[roomId].players.length >= 20) { socket.emit('error', 'Room full'); return; }
+      
+      player = { 
+        id: socket.id, 
+        userId, 
+        username, 
+        hand: [], 
+        hasFinished: false, 
+        unoDeclared: false,
+        connected: true 
+      };
+      rooms[roomId].players.push(player);
+    }
     
     io.to(roomId).emit('room_data', rooms[roomId]);
-    socket.emit('room_data', rooms[roomId]);
+    if (rooms[roomId].gameStarted) {
+      socket.emit('game_state', rooms[roomId]);
+    }
+  });
+
+  socket.on('disconnecting', () => {
+    for (const roomId of socket.rooms) {
+      if (rooms[roomId]) {
+        const player = rooms[roomId].players.find(p => p.id === socket.id);
+        if (player) {
+          player.connected = false;
+          io.to(roomId).emit('room_data', rooms[roomId]);
+          // Notify others
+          io.to(roomId).emit('notification', `${player.username} disconnected`);
+        }
+      }
+    }
   });
 
   socket.on('start_game', (roomId) => {

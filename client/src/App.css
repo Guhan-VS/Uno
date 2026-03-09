@@ -292,3 +292,18 @@
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
+
+.player-info.disconnected {
+  opacity: 0.5;
+  filter: grayscale(1);
+  border: 1px dashed rgba(255, 255, 255, 0.3) !important;
+}
+
+.player-info.disconnected::after {
+  content: 'OFFLINE';
+  font-size: 10px;
+  color: #e74c3c;
+  display: block;
+  font-weight: bold;
+  margin-top: 4px;
+}

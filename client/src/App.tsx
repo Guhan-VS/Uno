@@ -21,8 +21,15 @@ interface GameState {
 }
 
 function App() {
-  const [username, setUsername] = useState('');
-  const [roomId, setRoomId] = useState('');
+  const [userId] = useState(() => {
+    const saved = localStorage.getItem('uno_user_id');
+    if (saved) return saved;
+    const newId = Math.random().toString(36).substr(2, 9);
+    localStorage.setItem('uno_user_id', newId);
+    return newId;
+  });
+  const [username, setUsername] = useState(() => localStorage.getItem('uno_username') || '');
+  const [roomId, setRoomId] = useState(() => sessionStorage.getItem('uno_room_id') || '');
   const [joined, setJoined] = useState(false);
   const [roomData, setRoomData] = useState<any>(null);
   const [gameState, setGameState] = useState<GameState | null>(null);
@@ -32,24 +39,43 @@ function App() {
   const [notification, setNotification] = useState<string | null>(null);
 
   useEffect(() => {
-    socket.on('connect', () => setConnected(true));
-    socket.on('disconnect', () => setConnected(false));
+    const onConnect = () => {
+      setConnected(true);
+      // Rejoin if we have room info
+      const savedRoom = sessionStorage.getItem('uno_room_id');
+      const savedName = localStorage.getItem('uno_username');
+      if (savedRoom && savedName) {
+        socket.emit('join_room', { roomId: savedRoom, username: savedName, userId });
+        setJoined(true);
+      }
+    };
+    const onDisconnect = () => setConnected(false);
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
     socket.on('room_data', (data) => setRoomData(data));
     socket.on('game_state', (state) => setGameState(state));
-    socket.on('error', (msg) => { alert(msg); setJoined(false); });
-    socket.on('game_over', (data) => { setGameOverData(data); setGameState(null); });
+    socket.on('error', (msg) => { alert(msg); setJoined(false); sessionStorage.removeItem('uno_room_id'); });
+    socket.on('game_over', (data) => { 
+      setGameOverData(data); 
+      setGameState(null); 
+      sessionStorage.removeItem('uno_room_id');
+    });
     socket.on('notification', (msg) => {
       setNotification(msg);
       setTimeout(() => setNotification(null), 3000);
     });
 
+    if (socket.connected) onConnect();
+
     return () => {
-      socket.off('connect'); socket.off('disconnect');
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
       socket.off('room_data'); socket.off('game_state');
       socket.off('error'); socket.off('game_over');
       socket.off('notification');
     };
-  }, []);
+  }, [userId]);
 
   const generateRoomCode = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -59,7 +85,12 @@ function App() {
   };
 
   const joinRoom = () => { 
-    if (username && roomId) { socket.emit('join_room', { roomId, username }); setJoined(true); } 
+    if (username && roomId) { 
+      localStorage.setItem('uno_username', username);
+      sessionStorage.setItem('uno_room_id', roomId);
+      socket.emit('join_room', { roomId, username, userId }); 
+      setJoined(true); 
+    } 
     else alert('Please enter both name and room code');
   };
 
@@ -68,7 +99,7 @@ function App() {
   const declareUno = () => socket.emit('declare_uno', roomId);
 
   const playCard = (cardIndex: number) => {
-    const me = gameState?.players.find(p => p.id === socket.id);
+    const me = (gameState || roomData)?.players.find((p: any) => p.userId === userId);
     const card = me?.hand[cardIndex];
     if (card?.color === 'wild') setShowColorPicker(cardIndex);
     else socket.emit('play_card', { roomId, cardIndex, colorSelection: '' });
@@ -104,7 +135,7 @@ function App() {
       color: connected ? '#2ecc71' : '#e74c3c', zIndex: 1000,
       background: 'rgba(0,0,0,0.5)', padding: '5px 10px', borderRadius: '10px'
     }}>
-      ● {connected ? 'Connected' : 'Disconnected'}
+      ● {connected ? 'Connected' : 'Reconnecting...'}
     </div>
   );
 
@@ -125,7 +156,7 @@ function App() {
             </div>
           )}
         </div>
-        <button className="btn btn-start" style={{marginTop: '30px'}} onClick={() => window.location.reload()}>Back to Menu</button>
+        <button className="btn btn-start" style={{marginTop: '30px'}} onClick={() => { sessionStorage.removeItem('uno_room_id'); window.location.reload(); }}>Back to Menu</button>
       </div>
     );
   }
@@ -161,8 +192,8 @@ function App() {
 
   if (gameState && gameState.gameStarted) {
     const currentPlayer = gameState.players[gameState.currentPlayerIndex];
-    const isMyTurn = currentPlayer.id === socket.id;
-    const me = gameState.players.find(p => p.id === socket.id);
+    const isMyTurn = currentPlayer.userId === userId;
+    const me = gameState.players.find(p => p.userId === userId);
     const topCard = gameState.discardPile[gameState.discardPile.length - 1];
 
     if (me?.hasFinished) {
@@ -172,8 +203,8 @@ function App() {
           <h1 style={{color: '#2ecc71', fontSize: '40px'}}>✨ You Finished! ✨</h1>
           <div className="players-list" style={{marginTop: '40px'}}>
             {gameState.players.map(p => (
-              <div key={p.id} className={`player-info ${p.hasFinished ? 'finished' : ''}`}>
-                <div style={{fontWeight: 'bold'}}>{p.username}</div>
+              <div key={p.userId} className={`player-info ${p.hasFinished ? 'finished' : ''} ${p.connected === false ? 'disconnected' : ''}`}>
+                <div style={{fontWeight: 'bold'}}>{p.username} {p.connected === false ? '(DC)' : ''}</div>
                 <div>{p.hasFinished ? '✅ Done' : `🃏 ${p.hand.length}`}</div>
               </div>
             ))}
@@ -199,14 +230,14 @@ function App() {
         )}
 
         <div className="game-board">
-          {gameState.hostId === socket.id && (
+          {gameState.hostUserId === userId && (
             <button className="btn btn-pass" style={{position: 'absolute', top: '20px', right: '20px', opacity: 0.6}} onClick={endGameManual}>End Game</button>
           )}
           
           <div className="players-list">
             {gameState.players.map((p, i) => (
-              <div key={p.id} className={`player-info ${i === gameState.currentPlayerIndex ? 'active' : ''} ${p.hasFinished ? 'finished' : ''} ${p.unoDeclared ? 'uno-glow' : ''}`}>
-                <div style={{fontWeight: 'bold'}}>{p.username} {p.unoDeclared ? '📣 UNO!' : ''}</div>
+              <div key={p.userId} className={`player-info ${i === gameState.currentPlayerIndex ? 'active' : ''} ${p.hasFinished ? 'finished' : ''} ${p.unoDeclared ? 'uno-glow' : ''} ${p.connected === false ? 'disconnected' : ''}`}>
+                <div style={{fontWeight: 'bold'}}>{p.username} {p.unoDeclared ? '📣 UNO!' : ''} {p.connected === false ? '⚠️' : ''}</div>
                 <div>{p.hasFinished ? '✅' : `🃏 ${p.hand.length}`}</div>
               </div>
             ))}
